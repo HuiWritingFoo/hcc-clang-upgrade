@@ -2953,7 +2953,11 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
       }
       break;
     case llvm::Triple::CUDA:
-      TC = new toolchains::CudaToolChain(*this, Target, Args);
+      if (Target.getEnvironment() == llvm::Triple::HCC) {
+        TC = new toolchains::HCCToolChain(*this, Target, Args);
+      } else {
+        TC = new toolchains::CudaToolChain(*this, Target, Args);
+      }
       break;
     case llvm::Triple::PS4:
       TC = new toolchains::PS4CPU(*this, Target, Args);

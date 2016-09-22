@@ -1106,8 +1106,12 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
           F->addFnAttr(llvm::Attribute::NoDuplicate);
           F->addFnAttr(llvm::Attribute::NoUnwind);
       }
-      if (FD->hasAttr<OpenCLKernelAttr>())
+      if (FD->hasAttr<OpenCLKernelAttr>()) {
+        if (Context.getTargetInfo().getTriple().isNVPTX())
+          F->setCallingConv(llvm::CallingConv::PTX_Kernel);
+        else
           F->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+      }
   }
 
   if (FD->isReplaceableGlobalAllocationFunction()) {
