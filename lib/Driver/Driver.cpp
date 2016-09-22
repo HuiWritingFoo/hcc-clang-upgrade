@@ -485,7 +485,7 @@ void Driver::CreateOffloadingDeviceToolChains(Compilation &C,
                I.first == types::TY_HC_KERNEL;
       })) {
     const ToolChain &TC = getToolChain(
-        C.getInputArgs(), llvm::Triple("amdgcn--amdhsa-hcc"));
+        C.getInputArgs(), llvm::Triple("nvptx64--cuda-hcc"));//"amdgcn--amdhsa-hcc"));
     C.addOffloadDeviceToolChain(&TC, Action::OFK_HCC);
   }
 
