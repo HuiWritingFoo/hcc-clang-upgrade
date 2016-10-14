@@ -146,13 +146,13 @@ namespace clang {
 
     /// Results from loading a RedeclarableDecl.
     class RedeclarableResult {
-      GlobalDeclID FirstID;
       Decl *MergeWith;
+      GlobalDeclID FirstID;
       bool IsKeyDecl;
 
     public:
-      RedeclarableResult(GlobalDeclID FirstID, Decl *MergeWith, bool IsKeyDecl)
-          : FirstID(FirstID), MergeWith(MergeWith), IsKeyDecl(IsKeyDecl) {}
+      RedeclarableResult(Decl *MergeWith, GlobalDeclID FirstID, bool IsKeyDecl)
+        : MergeWith(MergeWith), FirstID(FirstID), IsKeyDecl(IsKeyDecl) {}
 
       /// \brief Retrieve the first ID.
       GlobalDeclID getFirstID() const { return FirstID; }
@@ -1236,7 +1236,7 @@ ASTDeclReader::RedeclarableResult ASTDeclReader::VisitVarDeclImpl(VarDecl *VD) {
 
   if (uint64_t Val = Record[Idx++]) {
     VD->setInit(Reader.ReadExpr(F));
-    if (Val > 1) {
+    if (Val > 1) { // IsInitKnownICE = 1, IsInitNotICE = 2, IsInitICE = 3
       EvaluatedStmt *Eval = VD->ensureEvaluatedStmt();
       Eval->CheckedICE = true;
       Eval->IsICE = Val == 3;
@@ -2311,7 +2311,7 @@ ASTDeclReader::VisitRedeclarable(Redeclarable<T> *D) {
   if (IsFirstLocalDecl)
     Reader.PendingDeclChains.push_back(std::make_pair(DAsT, RedeclOffset));
 
-  return RedeclarableResult(FirstDeclID, MergeWith, IsKeyDecl);
+  return RedeclarableResult(MergeWith, FirstDeclID, IsKeyDecl);
 }
 
 /// \brief Attempts to merge the given declaration (D) with another declaration
@@ -2320,8 +2320,6 @@ template<typename T>
 void ASTDeclReader::mergeRedeclarable(Redeclarable<T> *DBase,
                                       RedeclarableResult &Redecl,
                                       DeclID TemplatePatternID) {
-  T *D = static_cast<T*>(DBase);
-
   // If modules are not available, there is no reason to perform this merge.
   if (!Reader.getContext().getLangOpts().Modules)
     return;
@@ -2329,6 +2327,8 @@ void ASTDeclReader::mergeRedeclarable(Redeclarable<T> *DBase,
   // If we're not the canonical declaration, we don't need to merge.
   if (!DBase->isFirstDecl())
     return;
+
+  T *D = static_cast<T*>(DBase);
 
   if (auto *Existing = Redecl.getKnownMergeTarget())
     // We already know of an existing declaration we should merge with.
@@ -2353,9 +2353,10 @@ void ASTDeclReader::mergeTemplatePattern(RedeclarableTemplateDecl *D,
                                          DeclID DsID, bool IsKeyDecl) {
   auto *DPattern = D->getTemplatedDecl();
   auto *ExistingPattern = Existing->getTemplatedDecl();
-  RedeclarableResult Result(DPattern->getCanonicalDecl()->getGlobalID(),
-                            /*MergeWith*/ ExistingPattern, IsKeyDecl);
-
+  RedeclarableResult Result(/*MergeWith*/ ExistingPattern,  
+                            DPattern->getCanonicalDecl()->getGlobalID(), 
+                            IsKeyDecl);
+  
   if (auto *DClass = dyn_cast<CXXRecordDecl>(DPattern)) {
     // Merge with any existing definition.
     // FIXME: This is duplicated in several places. Refactor.
@@ -3615,12 +3616,12 @@ namespace {
   /// interface all the categories for it.
   class ObjCCategoriesVisitor {
     ASTReader &Reader;
-    serialization::GlobalDeclID InterfaceID;
     ObjCInterfaceDecl *Interface;
     llvm::SmallPtrSetImpl<ObjCCategoryDecl *> &Deserialized;
-    unsigned PreviousGeneration;
     ObjCCategoryDecl *Tail;
     llvm::DenseMap<DeclarationName, ObjCCategoryDecl *> NameCategoryMap;
+    serialization::GlobalDeclID InterfaceID;
+    unsigned PreviousGeneration;
     
     void add(ObjCCategoryDecl *Cat) {
       // Only process each category once.
@@ -3663,13 +3664,13 @@ namespace {
     
   public:
     ObjCCategoriesVisitor(ASTReader &Reader,
-                          serialization::GlobalDeclID InterfaceID,
                           ObjCInterfaceDecl *Interface,
-                        llvm::SmallPtrSetImpl<ObjCCategoryDecl *> &Deserialized,
+                          llvm::SmallPtrSetImpl<ObjCCategoryDecl *> &Deserialized,
+                          serialization::GlobalDeclID InterfaceID,
                           unsigned PreviousGeneration)
-      : Reader(Reader), InterfaceID(InterfaceID), Interface(Interface),
-        Deserialized(Deserialized), PreviousGeneration(PreviousGeneration),
-        Tail(nullptr)
+      : Reader(Reader), Interface(Interface), Deserialized(Deserialized),
+        Tail(nullptr), InterfaceID(InterfaceID),
+        PreviousGeneration(PreviousGeneration)
     {
       // Populate the name -> category map with the set of known categories.
       for (auto *Cat : Interface->known_categories()) {
@@ -3724,7 +3725,7 @@ namespace {
 void ASTReader::loadObjCCategories(serialization::GlobalDeclID ID,
                                    ObjCInterfaceDecl *D,
                                    unsigned PreviousGeneration) {
-  ObjCCategoriesVisitor Visitor(*this, ID, D, CategoriesDeserialized,
+  ObjCCategoriesVisitor Visitor(*this, D, CategoriesDeserialized, ID,
                                 PreviousGeneration);
   ModuleMgr.visit(Visitor);
 }

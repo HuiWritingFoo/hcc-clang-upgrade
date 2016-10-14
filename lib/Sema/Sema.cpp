@@ -88,8 +88,8 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
     VisContext(nullptr),
     IsBuildingRecoveryCallExpr(false),
     Cleanup{}, LateTemplateParser(nullptr),
-    LateTemplateParserCleanup(nullptr),
-    OpaqueParser(nullptr), IdResolver(pp), StdInitializerList(nullptr),
+    LateTemplateParserCleanup(nullptr), OpaqueParser(nullptr), IdResolver(pp),
+    StdExperimentalNamespaceCache(nullptr), StdInitializerList(nullptr),
     CXXTypeInfoDecl(nullptr), MSVCGuidDecl(nullptr),
     NSNumberDecl(nullptr), NSValueDecl(nullptr),
     NSStringDecl(nullptr), StringWithUTF8StringMethod(nullptr),
@@ -259,7 +259,6 @@ void Sema::Initialize() {
 }
 
 Sema::~Sema() {
-  llvm::DeleteContainerSeconds(LateParsedTemplateMap);
   if (VisContext) FreeVisContext();
   // Kill all the active scopes.
   for (unsigned I = 1, E = FunctionScopes.size(); I != E; ++I)

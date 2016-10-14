@@ -325,12 +325,6 @@ class ASTContext : public RefCountedBase<ASTContext> {
   };
   llvm::DenseMap<Module*, PerModuleInitializers*> ModuleInitializers;
 
-  /// Diagnostics that are emitted if and only if the given function is
-  /// codegen'ed.  Access these through FunctionDecl::addDeferredDiag() and
-  /// FunctionDecl::takeDeferredDiags().
-  llvm::DenseMap<const FunctionDecl *, std::vector<PartialDiagnosticAt>>
-      DeferredDiags;
-
 public:
   /// \brief A type synonym for the TemplateOrInstantiation mapping.
   typedef llvm::PointerUnion<VarTemplateDecl *, MemberSpecializationInfo *>
@@ -413,7 +407,7 @@ private:
   /// \brief Mapping from each declaration context to its corresponding
   /// mangling numbering context (used for constructs like lambdas which
   /// need to be consistently numbered for the mangler).
-  llvm::DenseMap<const DeclContext *, MangleNumberingContext *>
+  llvm::DenseMap<const DeclContext *, std::unique_ptr<MangleNumberingContext>>
       MangleNumberingContexts;
 
   /// \brief Side-table of mangling numbers for declarations which rarely
@@ -453,6 +447,12 @@ private:
 
   /// \brief Allocator for partial diagnostics.
   PartialDiagnostic::StorageAllocator DiagAllocator;
+
+  /// Diagnostics that are emitted if and only if the given function is
+  /// codegen'ed.  Access these through FunctionDecl::addDeferredDiag() and
+  /// FunctionDecl::takeDeferredDiags().
+  llvm::DenseMap<const FunctionDecl *, std::vector<PartialDiagnosticAt>>
+      DeferredDiags;
 
   /// \brief The current C++ ABI.
   std::unique_ptr<CXXABI> ABI;
@@ -1881,6 +1881,11 @@ public:
   unsigned getTypeAlign(QualType T) const { return getTypeInfo(T).Align; }
   unsigned getTypeAlign(const Type *T) const { return getTypeInfo(T).Align; }
 
+  /// \brief Return the ABI-specified alignment of a type, in bits, or 0 if
+  /// the type is incomplete and we cannot determine the alignment (for
+  /// example, from alignment attributes).
+  unsigned getTypeAlignIfKnown(QualType T) const;
+
   /// \brief Return the ABI-specified alignment of a (complete) type \p T, in 
   /// characters.
   CharUnits getTypeAlignInChars(QualType T) const;
@@ -2470,7 +2475,7 @@ public:
   /// DeclContext.
   MangleNumberingContext &getManglingNumberContext(const DeclContext *DC);
 
-  MangleNumberingContext *createMangleNumberingContext() const;
+  std::unique_ptr<MangleNumberingContext> createMangleNumberingContext() const;
 
   /// \brief Used by ParmVarDecl to store on the side the
   /// index of the parameter when it exceeds the size of the normal bitfield.

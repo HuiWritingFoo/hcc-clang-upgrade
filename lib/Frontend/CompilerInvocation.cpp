@@ -734,8 +734,11 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
       Args.hasArg(OPT_fsanitize_memory_use_after_dtor);
   Opts.SanitizeCfiCrossDso = Args.hasArg(OPT_fsanitize_cfi_cross_dso);
   Opts.SanitizeStats = Args.hasArg(OPT_fsanitize_stats);
-  Opts.SanitizeAddressUseAfterScope =
-      Args.hasArg(OPT_fsanitize_address_use_after_scope);
+  if (Arg *A = Args.getLastArg(OPT_fsanitize_address_use_after_scope,
+                               OPT_fno_sanitize_address_use_after_scope)) {
+    Opts.SanitizeAddressUseAfterScope =
+        A->getOption().getID() == OPT_fsanitize_address_use_after_scope;
+  }
   Opts.SSPBufferSize =
       getLastArgIntValue(Args, OPT_stack_protector_buffer_size, 8, Diags);
   Opts.StackRealignment = Args.hasArg(OPT_mstackrealign);
@@ -824,6 +827,10 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
   Opts.DependentLibraries = Args.getAllArgValues(OPT_dependent_lib);
   Opts.LinkerOptions = Args.getAllArgValues(OPT_linker_option);
   bool NeedLocTracking = false;
+
+  Opts.OptRecordFile = Args.getLastArgValue(OPT_opt_record_file);
+  if (!Opts.OptRecordFile.empty())
+    NeedLocTracking = true;
 
   if (Arg *A = Args.getLastArg(OPT_Rpass_EQ)) {
     Opts.OptimizationRemarkPattern =
@@ -952,7 +959,7 @@ static bool parseShowColorsArgs(const ArgList &Args, bool DefaultColor) {
 
 bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
                                 DiagnosticsEngine *Diags,
-                                bool DefaultDiagColor) {
+                                bool DefaultDiagColor, bool DefaultShowOpt) {
   using namespace options;
   bool Success = true;
 
@@ -972,7 +979,9 @@ bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   Opts.ShowFixits = !Args.hasArg(OPT_fno_diagnostics_fixit_info);
   Opts.ShowLocation = !Args.hasArg(OPT_fno_show_source_location);
   Opts.AbsolutePath = Args.hasArg(OPT_fdiagnostics_absolute_paths);
-  Opts.ShowOptionNames = Args.hasArg(OPT_fdiagnostics_show_option);
+  Opts.ShowOptionNames =
+      Args.hasFlag(OPT_fdiagnostics_show_option,
+                   OPT_fno_diagnostics_show_option, DefaultShowOpt);
 
   llvm::sys::Process::UseANSIEscapeCodes(Args.hasArg(OPT_fansi_escape_codes));
 
@@ -1254,6 +1263,7 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
   Opts.AuxTriple =
       llvm::Triple::normalize(Args.getLastArgValue(OPT_aux_triple));
   Opts.FindPchSource = Args.getLastArgValue(OPT_find_pch_source_EQ);
+  Opts.StatsFile = Args.getLastArgValue(OPT_stats_file);
 
   if (const Arg *A = Args.getLastArg(OPT_arcmt_check,
                                      OPT_arcmt_modify,
@@ -1637,6 +1647,8 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
   Opts.GNUKeywords = Opts.GNUMode;
   Opts.CXXOperatorNames = Opts.CPlusPlus;
 
+  Opts.AlignedAllocation = Opts.CPlusPlus1z;
+
   Opts.DollarIdents = !Opts.AsmPreprocessor;
 }
 
@@ -1931,7 +1943,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.Blocks = Args.hasArg(OPT_fblocks) || (Opts.OpenCL
     && Opts.OpenCLVersion >= 200);
   Opts.BlocksRuntimeOptional = Args.hasArg(OPT_fblocks_runtime_optional);
-  Opts.Coroutines = Args.hasArg(OPT_fcoroutines);
+  Opts.CoroutinesTS = Args.hasArg(OPT_fcoroutines_ts);
   Opts.ModulesTS = Args.hasArg(OPT_fmodules_ts);
   Opts.Modules = Args.hasArg(OPT_fmodules) || Opts.ModulesTS;
   Opts.ModulesStrictDeclUse = Args.hasArg(OPT_fmodules_strict_decluse);
@@ -1954,6 +1966,17 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
     getAllNoBuiltinFuncValues(Args, Opts.NoBuiltinFuncs);
   Opts.NoMathBuiltin = Args.hasArg(OPT_fno_math_builtin);
   Opts.SizedDeallocation = Args.hasArg(OPT_fsized_deallocation);
+  Opts.AlignedAllocation =
+      Args.hasFlag(OPT_faligned_allocation, OPT_fno_aligned_allocation,
+                   Opts.AlignedAllocation);
+  Opts.NewAlignOverride =
+      getLastArgIntValue(Args, OPT_fnew_alignment_EQ, 0, Diags);
+  if (Opts.NewAlignOverride && !llvm::isPowerOf2_32(Opts.NewAlignOverride)) {
+    Arg *A = Args.getLastArg(OPT_fnew_alignment_EQ);
+    Diags.Report(diag::err_fe_invalid_alignment) << A->getAsString(Args)
+                                                 << A->getValue();
+    Opts.NewAlignOverride = 0;
+  }
   Opts.ConceptsTS = Args.hasArg(OPT_fconcepts_ts);
   Opts.HeinousExtensions = Args.hasArg(OPT_fheinous_gnu_extensions);
   Opts.AccessControl = !Args.hasArg(OPT_fno_access_control);
@@ -2016,9 +2039,10 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   // enabled for Microsoft Extensions or Borland Extensions, here.
   //
   // FIXME: __declspec is also currently enabled for CUDA, but isn't really a
-  // CUDA extension, however it is required for supporting cuda_builtin_vars.h,
-  // which uses __declspec(property). Once that has been rewritten in terms of
-  // something more generic, remove the Opts.CUDA term here.
+  // CUDA extension. However, it is required for supporting
+  // __clang_cuda_builtin_vars.h, which uses __declspec(property). Once that has
+  // been rewritten in terms of something more generic, remove the Opts.CUDA
+  // term here.
   Opts.DeclSpecKeyword =
       Args.hasFlag(OPT_fdeclspec, OPT_fno_declspec,
                    (Opts.MicrosoftExt || Opts.Borland || Opts.CUDA));
@@ -2413,8 +2437,9 @@ bool CompilerInvocation::CreateFromArgs(CompilerInvocation &Res,
   Success &= ParseAnalyzerArgs(*Res.getAnalyzerOpts(), Args, Diags);
   Success &= ParseMigratorArgs(Res.getMigratorOpts(), Args);
   ParseDependencyOutputArgs(Res.getDependencyOutputOpts(), Args);
-  Success &= ParseDiagnosticArgs(Res.getDiagnosticOpts(), Args, &Diags,
-                                 false /*DefaultDiagColor*/);
+  Success &=
+      ParseDiagnosticArgs(Res.getDiagnosticOpts(), Args, &Diags,
+                          false /*DefaultDiagColor*/, false /*DefaultShowOpt*/);
   ParseCommentArgs(LangOpts.CommentOpts, Args);
   ParseFileSystemArgs(Res.getFileSystemOpts(), Args);
   // FIXME: We shouldn't have to pass the DashX option around here

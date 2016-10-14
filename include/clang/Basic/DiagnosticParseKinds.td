@@ -914,7 +914,7 @@ def warn_pragma_pack_malformed : Warning<
 // - #pragma intrinsic
 def warn_pragma_intrinsic_builtin : Warning<
   "%0 is not a recognized builtin%select{|; consider including <intrin.h> to access non-builtin intrinsics}1">,
-  InGroup<IgnoredPragmas>;
+  InGroup<IgnoredPragmaIntrinsic>;
 // - #pragma unused
 def warn_pragma_unused_expected_var : Warning<
   "expected '#pragma unused' argument to be a variable name">,
@@ -1022,6 +1022,15 @@ def err_pragma_invalid_keyword : Error<
 def warn_pragma_unroll_cuda_value_in_parens : Warning<
   "argument to '#pragma unroll' should not be in parentheses in CUDA C/C++">,
   InGroup<CudaCompat>;
+def warn_cuda_attr_lambda_position : Warning<
+  "nvcc does not allow '__%0__' to appear after '()' in lambdas">,
+  InGroup<CudaCompat>;
+def warn_pragma_force_cuda_host_device_bad_arg : Warning<
+  "incorrect use of #pragma clang force_cuda_host_device begin|end">,
+  InGroup<IgnoredPragmas>;
+def err_pragma_cannot_end_force_cuda_host_device : Error<
+  "force_cuda_host_device end pragma without matching "
+  "force_cuda_host_device begin">;
 
 // C++AMP supoport.
 def err_expected_restrict : Error<

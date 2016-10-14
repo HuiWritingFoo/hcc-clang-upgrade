@@ -6798,7 +6798,7 @@ bool Sema::ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM,
     DeclarationName Name =
       Context.DeclarationNames.getCXXOperatorName(OO_Delete);
     if (FindDeallocationFunction(MD->getLocation(), MD->getParent(), Name,
-                                 OperatorDelete, false)) {
+                                 OperatorDelete, /*Diagnose*/false)) {
       if (Diagnose)
         Diag(RD->getLocation(), diag::note_deleted_dtor_no_operator_delete);
       return true;
@@ -7522,6 +7522,10 @@ void Sema::DeclareAMPSerializer(CXXRecordDecl *ClassDecl, DeclarationName Name) 
                          CXXAMPRestrictCPUAttr(CurrentLocation, Context, 0));
   SerializeFunc->addAttr(::new (Context)
                          AnnotateAttr(CurrentLocation, Context, "serialize", 0));
+
+  // don't generate any debug info
+  SerializeFunc->addAttr(new (Context) NoDebugAttr(CurrentLocation, Context, 0));
+
   ClassDecl->addDecl(SerializeFunc);
   // Now we've obtained a valid Name. Use that to recursively declare
   // __cxxamp_serialize() for member classes. TBD: base classes?
@@ -7662,6 +7666,10 @@ void Sema::DeclareAMPDeserializer(CXXRecordDecl *ClassDecl, AMPDeserializerArgs 
   Constructor->addAttr(::new (Context) CXXAMPRestrictAMPAttr(ClassLoc, Context, 0));
   Constructor->addAttr(::new (Context)
     AnnotateAttr(ClassLoc, Context, "auto_deserialize", 0));
+
+  // don't generate any debug info
+  Constructor->addAttr(new (Context) NoDebugAttr(ClassLoc, Context, 0));
+
   // Introduce this constructor into its scope.
   if (Scope *S = getScopeForContext(ClassDecl))
     PushOnScopeChains(Constructor, S, false);
@@ -7998,19 +8006,11 @@ bool Sema::CheckDestructor(CXXDestructorDecl *Destructor) {
       Loc = RD->getLocation();
     
     // If we have a virtual destructor, look up the deallocation function
-    FunctionDecl *OperatorDelete = nullptr;
-    DeclarationName Name = 
-    Context.DeclarationNames.getCXXOperatorName(OO_Delete);
-    if (FindDeallocationFunction(Loc, RD, Name, OperatorDelete))
-      return true;
-    // If there's no class-specific operator delete, look up the global
-    // non-array delete.
-    if (!OperatorDelete)
-      OperatorDelete = FindUsualDeallocationFunction(Loc, true, Name);
-
-    MarkFunctionReferenced(Loc, OperatorDelete);
-    
-    Destructor->setOperatorDelete(OperatorDelete);
+    if (FunctionDecl *OperatorDelete =
+            FindDeallocationFunctionForDestructor(Loc, RD)) {
+      MarkFunctionReferenced(Loc, OperatorDelete);
+      Destructor->setOperatorDelete(OperatorDelete);
+    }
   }
   
   return false;
@@ -8392,7 +8392,7 @@ static void DiagnoseNamespaceInlineMismatch(Sema &S, SourceLocation KeywordLoc,
     S.Diag(Loc, diag::warn_inline_namespace_reopened_noninline)
       << FixItHint::CreateInsertion(KeywordLoc, "inline ");
   else
-    S.Diag(Loc, diag::err_inline_namespace_mismatch) << *IsInline;
+    S.Diag(Loc, diag::err_inline_namespace_mismatch);
 
   S.Diag(PrevNS->getLocation(), diag::note_previous_definition);
   *IsInline = PrevNS->isInline();
@@ -8569,9 +8569,27 @@ CXXRecordDecl *Sema::getStdBadAlloc() const {
                                   StdBadAlloc.get(Context.getExternalSource()));
 }
 
+EnumDecl *Sema::getStdAlignValT() const {
+  return cast_or_null<EnumDecl>(StdAlignValT.get(Context.getExternalSource()));
+}
+
 NamespaceDecl *Sema::getStdNamespace() const {
   return cast_or_null<NamespaceDecl>(
                                  StdNamespace.get(Context.getExternalSource()));
+}
+
+NamespaceDecl *Sema::lookupStdExperimentalNamespace() {
+  if (!StdExperimentalNamespaceCache) {
+    if (auto Std = getStdNamespace()) {
+      LookupResult Result(*this, &PP.getIdentifierTable().get("experimental"),
+                          SourceLocation(), LookupNamespaceName);
+      if (!LookupQualifiedName(Result, Std) ||
+          !(StdExperimentalNamespaceCache =
+                Result.getAsSingle<NamespaceDecl>()))
+        Result.suppressDiagnostics();
+    }
+  }
+  return StdExperimentalNamespaceCache;
 }
 
 /// \brief Retrieve the special "std" namespace, which may require us to 
@@ -9755,11 +9773,13 @@ bool Sema::CheckUsingDeclQualifier(SourceLocation UsingLoc,
         return true;
       }
 
-      Diag(SS.getRange().getBegin(),
-           diag::err_using_decl_nested_name_specifier_is_not_base_class)
-        << SS.getScopeRep()
-        << cast<CXXRecordDecl>(CurContext)
-        << SS.getRange();
+      if (!cast<CXXRecordDecl>(NamedContext)->isInvalidDecl()) {
+        Diag(SS.getRange().getBegin(),
+             diag::err_using_decl_nested_name_specifier_is_not_base_class)
+          << SS.getScopeRep()
+          << cast<CXXRecordDecl>(CurContext)
+          << SS.getRange();
+      }
       return true;
     }
 
@@ -10565,7 +10585,11 @@ CXXDestructorDecl *Sema::DeclareImplicitDestructor(CXXRecordDecl *ClassDecl) {
   Scope *S = getScopeForContext(ClassDecl);
   CheckImplicitSpecialMemberDeclaration(S, Destructor);
 
-  if (ShouldDeleteSpecialMember(Destructor, CXXDestructor))
+  // We can't check whether an implicit destructor is deleted before we complete
+  // the definition of the class, because its validity depends on the alignment
+  // of the class. We'll check this from ActOnFields once the class is complete.
+  if (ClassDecl->isCompleteDefinition() &&
+      ShouldDeleteSpecialMember(Destructor, CXXDestructor))
     SetDeclDeleted(Destructor, ClassLoc);
 
   // Introduce this destructor into its scope.
@@ -11601,6 +11625,10 @@ void Sema::DeclareAMPTrampolineName(CXXRecordDecl *ClassDecl, DeclarationName Na
      Trampoline->addAttr(new (Context) CXXAMPRestrictAMPAttr(CurrentLocation, Context, 0));
   Trampoline->addAttr(new (Context) CXXAMPRestrictCPUAttr(CurrentLocation, Context, 0));
   Trampoline->addAttr(new (Context) AnnotateAttr(CurrentLocation, Context, "__cxxamp_trampoline_name", 0));
+
+  // don't generate any debug info
+  Trampoline->addAttr(new (Context) NoDebugAttr(CurrentLocation, Context, 0));
+
   ClassDecl->addDecl(Trampoline);
   // Generate definition
   MarkFunctionReferenced(CurrentLocation, Trampoline);
@@ -11648,6 +11676,10 @@ void CreateDummyAMPTrampoline(Sema& S, DeclarationName Name, CXXRecordDecl *&Cla
    // Manually add this Attribute on this stage to avoid
    //     ClassDecl->getCXXAMPDeserializationConstructor() == NULL
    Trampoline->addAttr(::new (Context) AnnotateAttr(CurrentLocation, Context, "dummy_deserialize", 0));
+
+   // don't generate any debug info
+   Trampoline->addAttr(new (Context) NoDebugAttr(CurrentLocation, Context, 0));
+
    ClassDecl->addDecl(Trampoline);
 }
 
@@ -11856,6 +11888,10 @@ void Sema::DeclareAMPTrampoline(CXXRecordDecl *ClassDecl,
   // so that parallel_for_each can find it.
   Trampoline->addAttr(::new (Context) CXXAMPRestrictCPUAttr(CurrentLocation, Context, 0));
   Trampoline->addAttr(::new (Context) AnnotateAttr(CurrentLocation, Context, "__cxxamp_trampoline", 0));
+
+  // don't generate any debug info
+  Trampoline->addAttr(new (Context) NoDebugAttr(CurrentLocation, Context, 0));
+
   ClassDecl->addDecl(Trampoline);
   // Generate definition
   MarkFunctionReferenced(CurrentLocation, Trampoline);
@@ -14969,9 +15005,14 @@ NamedDecl *Sema::ActOnFriendFunctionDecl(Scope *S, Declarator &D,
     // and shall be the only declaration of the function or function
     // template in the translation unit.
     if (functionDeclHasDefaultArgument(FD)) {
-      if (FunctionDecl *OldFD = FD->getPreviousDecl()) {
+      // We can't look at FD->getPreviousDecl() because it may not have been set
+      // if we're in a dependent context. If we get this far with a non-empty
+      // Previous set, we must have a valid previous declaration of this
+      // function.
+      if (!Previous.empty()) {
         Diag(FD->getLocation(), diag::err_friend_decl_with_def_arg_redeclared);
-        Diag(OldFD->getLocation(), diag::note_previous_declaration);
+        Diag(Previous.getRepresentativeDecl()->getLocation(),
+             diag::note_previous_declaration);
       } else if (!D.isFunctionDefinition())
         Diag(FD->getLocation(), diag::err_friend_decl_with_def_arg_must_be_def);
     }

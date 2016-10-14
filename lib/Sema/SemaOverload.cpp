@@ -1196,6 +1196,11 @@ bool Sema::IsOverload(FunctionDecl *New, FunctionDecl *Old,
   }
 
   if (getLangOpts().CUDA && ConsiderCudaAttrs) {
+    // Don't allow overloading of destructors.  (In theory we could, but it
+    // would be a giant change to clang.)
+    if (isa<CXXDestructorDecl>(New))
+      return false;
+
     CUDAFunctionTarget NewTarget = IdentifyCUDATarget(New),
                        OldTarget = IdentifyCUDATarget(Old);
     if (NewTarget == CFT_InvalidTarget || NewTarget == CFT_Global)
@@ -1203,17 +1208,17 @@ bool Sema::IsOverload(FunctionDecl *New, FunctionDecl *Old,
 
     assert((OldTarget != CFT_InvalidTarget) && "Unexpected invalid target.");
 
-    // Don't allow mixing of HD with other kinds. This guarantees that
-    // we have only one viable function with this signature on any
-    // side of CUDA compilation .
-    // __global__ functions can't be overloaded based on attribute
-    // difference because, like HD, they also exist on both sides.
+    // Don't allow HD and global functions to overload other functions with the
+    // same signature.  We allow overloading based on CUDA attributes so that
+    // functions can have different implementations on the host and device, but
+    // HD/global functions "exist" in some sense on both the host and device, so
+    // should have the same implementation on both sides.
     if ((NewTarget == CFT_HostDevice) || (OldTarget == CFT_HostDevice) ||
         (NewTarget == CFT_Global) || (OldTarget == CFT_Global))
       return false;
 
-    // Allow overloading of functions with same signature, but
-    // different CUDA target attributes.
+    // Allow overloading of functions with same signature and different CUDA
+    // target attributes.
     return NewTarget != OldTarget;
   }
 
@@ -5406,6 +5411,7 @@ TryContextuallyConvertToObjCPointer(Sema &S, Expr *From) {
 
 /// PerformContextuallyConvertToObjCPointer - Perform a contextual
 /// conversion of the expression From to an Objective-C pointer type.
+/// Returns a valid but null ExprResult if no conversion sequence exists.
 ExprResult Sema::PerformContextuallyConvertToObjCPointer(Expr *From) {
   if (checkPlaceholderForOverload(*this, From))
     return ExprError();
@@ -5415,7 +5421,7 @@ ExprResult Sema::PerformContextuallyConvertToObjCPointer(Expr *From) {
     TryContextuallyConvertToObjCPointer(*this, From);
   if (!ICS.isBad())
     return PerformImplicitConversion(From, Ty, ICS, AA_Converting);
-  return ExprError();
+  return ExprResult();
 }
 
 /// Determine whether the provided type is an integral type, or an enumeration
@@ -10475,16 +10481,17 @@ static void CompleteNonViableCandidate(Sema &S, OverloadCandidate *Cand,
 /// PrintOverloadCandidates - When overload resolution fails, prints
 /// diagnostic messages containing the candidates in the candidate
 /// set.
-void OverloadCandidateSet::NoteCandidates(Sema &S,
-                                          OverloadCandidateDisplayKind OCD,
-                                          ArrayRef<Expr *> Args,
-                                          StringRef Opc,
-                                          SourceLocation OpLoc) {
+void OverloadCandidateSet::NoteCandidates(
+    Sema &S, OverloadCandidateDisplayKind OCD, ArrayRef<Expr *> Args,
+    StringRef Opc, SourceLocation OpLoc,
+    llvm::function_ref<bool(OverloadCandidate &)> Filter) {
   // Sort the candidates by viability and position.  Sorting directly would
   // be prohibitive, so we make a set of pointers and sort those.
   SmallVector<OverloadCandidate*, 32> Cands;
   if (OCD == OCD_AllCandidates) Cands.reserve(size());
   for (iterator Cand = begin(), LastCand = end(); Cand != LastCand; ++Cand) {
+    if (!Filter(*Cand))
+      continue;
     if (Cand->Viable)
       Cands.push_back(Cand);
     else if (OCD == OCD_AllCandidates) {

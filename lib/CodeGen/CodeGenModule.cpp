@@ -516,6 +516,9 @@ void CodeGenModule::Release() {
     DiagnosticBuilder Builder(getDiags().Report(Loc, PD.getDiagID()));
     PD.Emit(Builder);
   }
+  // Clear the deferred diags so they don't outlive the ASTContext's
+  // PartialDiagnostic allocator.
+  DeferredDiags.clear();
 }
 
 void CodeGenModule::UpdateCompletedType(const TagDecl *TD) {
@@ -853,6 +856,19 @@ void CodeGenModule::SetLLVMFunctionAttributes(const Decl *D,
                          false);
   F->setAttributes(llvm::AttributeSet::get(getLLVMContext(), AttributeList));
   F->setCallingConv(static_cast<llvm::CallingConv::ID>(CallingConv));
+
+  // HCC-specific
+  if (D) {
+    llvm::AttrBuilder B;
+    if (D->hasAttr<HCGridLaunchAttr>()) {
+      // hc_grid_launch attribute implies noinline and will win over always_inline
+      B.addAttribute("hc_grid_launch");
+      B.addAttribute(llvm::Attribute::NoInline);
+    }
+    F->addAttributes(llvm::AttributeSet::FunctionIndex,
+                     llvm::AttributeSet::get(
+                         F->getContext(), llvm::AttributeSet::FunctionIndex, B));
+  }
 }
 
 /// Determines whether the language options require us to model
@@ -898,12 +914,6 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
                          F->getContext(),
                          llvm::AttributeSet::FunctionIndex, B));
     return;
-  }
-
-  if (D->hasAttr<HCGridLaunchAttr>()) {
-    // hc_grid_launch attribute implies noinline and will win over always_inline
-    B.addAttribute("hc_grid_launch");
-    B.addAttribute(llvm::Attribute::NoInline);
   }
 
   if (D->hasAttr<NakedAttr>()) {
@@ -1950,21 +1960,27 @@ CodeGenModule::GetOrCreateLLVMFunction(StringRef MangledName,
     if (D && !D->hasAttr<DLLImportAttr>() && !D->hasAttr<DLLExportAttr>())
       Entry->setDLLStorageClass(llvm::GlobalValue::DefaultStorageClass);
 
-    // If there are two attempts to define the same mangled name, issue an
-    // error.
-    if (IsForDefinition && !Entry->isDeclaration()) {
-      GlobalDecl OtherGD;
-      // Check that GD is not yet in DiagnosedConflictingDefinitions is required
-      // to make sure that we issue an error only once.
-      if (lookupRepresentativeDecl(MangledName, OtherGD) &&
-          (GD.getCanonicalDecl().getDecl() !=
-           OtherGD.getCanonicalDecl().getDecl()) &&
-          DiagnosedConflictingDefinitions.insert(GD).second) {
-        getDiags().Report(D->getLocation(),
-                          diag::err_duplicate_mangled_name);
-        getDiags().Report(OtherGD.getDecl()->getLocation(),
-                          diag::note_previous_definition);
+
+    // Relax the rule for C++AMP
+    if (!LangOpts.CPlusPlusAMP) {
+
+      // If there are two attempts to define the same mangled name, issue an
+      // error.
+      if (IsForDefinition && !Entry->isDeclaration()) {
+        GlobalDecl OtherGD;
+        // Check that GD is not yet in DiagnosedConflictingDefinitions is required
+        // to make sure that we issue an error only once.
+        if (lookupRepresentativeDecl(MangledName, OtherGD) &&
+            (GD.getCanonicalDecl().getDecl() !=
+             OtherGD.getCanonicalDecl().getDecl()) &&
+            DiagnosedConflictingDefinitions.insert(GD).second) {
+          getDiags().Report(D->getLocation(),
+                            diag::err_duplicate_mangled_name);
+          getDiags().Report(OtherGD.getDecl()->getLocation(),
+                            diag::note_previous_definition);
+        }
       }
+
     }
 
     if ((isa<llvm::Function>(Entry) || isa<llvm::GlobalAlias>(Entry)) &&
@@ -2994,6 +3010,10 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
   // non-error diags here, because order can be significant, e.g. with notes
   // that follow errors.)
   auto Diags = D->takeDeferredDiags();
+  if (auto *Templ = D->getPrimaryTemplate()) {
+    auto TemplDiags = Templ->getAsFunction()->takeDeferredDiags();
+    Diags.insert(Diags.end(), TemplDiags.begin(), TemplDiags.end());
+  }
   bool HasError = llvm::any_of(Diags, [this](const PartialDiagnosticAt &PDAt) {
     return getDiags().getDiagnosticLevel(PDAt.second.getDiagID(), PDAt.first) >=
            DiagnosticsEngine::Error;
@@ -3214,13 +3234,12 @@ GetConstantCFStringEntry(llvm::StringMap<llvm::GlobalVariable *> &Map,
   // Otherwise, convert the UTF8 literals into a string of shorts.
   IsUTF16 = true;
 
-  SmallVector<UTF16, 128> ToBuf(NumBytes + 1); // +1 for ending nulls.
-  const UTF8 *FromPtr = (const UTF8 *)String.data();
-  UTF16 *ToPtr = &ToBuf[0];
+  SmallVector<llvm::UTF16, 128> ToBuf(NumBytes + 1); // +1 for ending nulls.
+  const llvm::UTF8 *FromPtr = (const llvm::UTF8 *)String.data();
+  llvm::UTF16 *ToPtr = &ToBuf[0];
 
-  (void)ConvertUTF8toUTF16(&FromPtr, FromPtr + NumBytes,
-                           &ToPtr, ToPtr + NumBytes,
-                           strictConversion);
+  (void)llvm::ConvertUTF8toUTF16(&FromPtr, FromPtr + NumBytes, &ToPtr,
+                                 ToPtr + NumBytes, llvm::strictConversion);
 
   // ConvertUTF8toUTF16 returns the length in ToPtr.
   StringLength = ToPtr - &ToBuf[0];
