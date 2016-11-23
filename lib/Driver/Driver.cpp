@@ -484,9 +484,19 @@ void Driver::CreateOffloadingDeviceToolChains(Compilation &C,
                I.first == types::TY_HC_HOST ||
                I.first == types::TY_HC_KERNEL;
       })) {
-    const ToolChain &TC = getToolChain(
-        C.getInputArgs(), llvm::Triple("nvptx64--cuda-hcc"));//"amdgcn--amdhsa-hcc"));
-    C.addOffloadDeviceToolChain(&TC, Action::OFK_HCC);
+    if (C.getArgs().hasArg(options::OPT_cuda_gpu_arch_EQ) ||
+        C.getArgs().hasArg(options::OPT_cuda_path_EQ)) {
+      // A solution as of now to introduce new triple for HCC Cuda
+      // This requires all modules in linking stage to use the same triple,
+      // otherwise link the module that has expected triple first.
+      const ToolChain &TC = getToolChain(
+          C.getInputArgs(), llvm::Triple("nvptx64--cuda-hcc"));
+      C.addOffloadDeviceToolChain(&TC, Action::OFK_HCC);
+    } else {
+      const ToolChain &TC = getToolChain(
+          C.getInputArgs(), llvm::Triple("amdgcn--amdhsa-hcc"));
+      C.addOffloadDeviceToolChain(&TC, Action::OFK_HCC);
+    }
   }
 
   //
